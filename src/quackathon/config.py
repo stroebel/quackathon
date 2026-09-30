@@ -33,8 +33,11 @@ class PilotConfig:
     cluster_cell_m: float = 500.0
     min_buildings_per_cluster: int = 3
 
-    # Demand model (ESMAP MTF Tier 2-3 is roughly 0.2-1.0 kWh/household/day).
-    households_per_building: float = 1.0
+    # Demand model. Rural homesteads here typically have several structures
+    # (rondavels, kitchens), so households per building is well below 1; calibrate
+    # against Census 2022 ward household counts.
+    # ESMAP MTF Tier 2-3 is roughly 0.2-1.0 kWh/household/day.
+    households_per_building: float = 0.25
     kwh_per_household_day: float = 0.5
 
     # Economics: minimise sum(site_cost) - value_per_kwh_day * served_demand.

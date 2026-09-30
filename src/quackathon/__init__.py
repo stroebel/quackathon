@@ -15,7 +15,7 @@ def main() -> None:
     parser.add_argument("--sites", type=int, default=defaults.n_sites, help="microgrids to build")
     parser.add_argument("--candidates", type=int, default=defaults.n_candidates, help="qubits")
     parser.add_argument("--radius", type=float, default=defaults.service_radius_m, help="metres")
-    parser.add_argument("--buildings", choices=["osm", "synthetic"], default="osm")
+    parser.add_argument("--buildings", choices=["overture", "osm", "synthetic"], default="overture")
     args = parser.parse_args()
 
     cfg = PilotConfig(

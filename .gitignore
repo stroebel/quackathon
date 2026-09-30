@@ -12,3 +12,5 @@ wheels/
 
 shapefiles/
 .DS_Store
+
+# Downloaded/cached datasets

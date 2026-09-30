@@ -8,8 +8,9 @@ from quackathon.config import PilotConfig
 from quackathon.demand import candidate_sites, cluster_buildings, far_from_grid
 from quackathon.grid import load_grid
 from quackathon.osm import fetch_buildings
+from quackathon.overture import fetch_building_centroids
 from quackathon.problem import MicrogridProblem
-from quackathon.region import load_ward
+from quackathon.region import load_ward, load_wards
 from quackathon.synthetic import synthetic_buildings
 
 
@@ -25,10 +26,14 @@ class Pilot:
     problem: MicrogridProblem
 
 
-def build_pilot(cfg: PilotConfig, buildings_source: str = "osm") -> Pilot:
+def build_pilot(cfg: PilotConfig, buildings_source: str = "overture") -> Pilot:
     ward = load_ward(cfg)
     grid = load_grid(ward, cfg)
-    if buildings_source == "osm":
+    if buildings_source == "overture":
+        # Fetched once for the whole municipality (one cache), then clipped.
+        buildings = fetch_building_centroids(load_wards(cfg), cfg.raw_dir)
+        buildings = buildings[buildings.within(ward.union_all())].reset_index(drop=True)
+    elif buildings_source == "osm":
         buildings = fetch_buildings(ward, cfg.raw_dir)
     elif buildings_source == "synthetic":
         buildings = synthetic_buildings(ward)
