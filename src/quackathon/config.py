@@ -16,9 +16,9 @@ class PilotConfig:
 
     # Demand focus: settlement clusters further than this from the grid.
     grid_distance_m: float = 2_000.0
-    # "osm" (mapped lines, very incomplete here) or "gridfinder" (predicted MV grid,
-    # Arderne et al. 2020, needs data/raw/grid.gpkg from zenodo.org/records/3628142).
-    grid_source: str = "osm"
+    # "gridfinder" (OSM lines plus predicted MV grid, Arderne et al. 2020; clipped copy
+    # in data/raw) or "osm" (mapped lines only, mostly 132 kV transmission here).
+    grid_source: str = "gridfinder"
 
     # Siting: build exactly this many microgrids.
     n_sites: int = 3

@@ -12,7 +12,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Microgrid siting pilot for one Ntabankulu ward")
     parser.add_argument("--ward", type=int, default=defaults.ward_no)
     parser.add_argument("--grid-distance", type=float, default=defaults.grid_distance_m, help="metres")
-    parser.add_argument("--grid-source", choices=["osm", "gridfinder"], default=defaults.grid_source)
+    parser.add_argument("--grid-source", choices=["gridfinder", "osm"], default=defaults.grid_source)
     parser.add_argument("--sites", type=int, default=defaults.n_sites, help="microgrids to build")
     parser.add_argument("--candidates", type=int, default=defaults.n_candidates, help="qubits")
     parser.add_argument("--radius", type=float, default=defaults.service_radius_m, help="metres")

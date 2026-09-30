@@ -49,6 +49,21 @@ def use_style() -> None:
     })
 
 
+def _plot_grid(ax, grid, clip_to, linewidth=1.5):
+    """Mapped lines solid, gridfinder-predicted lines dashed. Returns legend handles."""
+    grid = grid.clip(clip_to)
+    predicted = grid["source"].eq("gridfinder") if "source" in grid else None
+    handles = [plt.Line2D([], [], color=INK, linewidth=linewidth, label="grid (mapped)")]
+    if predicted is None or not predicted.any():
+        grid.plot(ax=ax, color=INK, linewidth=linewidth)
+        return handles
+    grid[~predicted].plot(ax=ax, color=INK, linewidth=linewidth)
+    grid[predicted].plot(ax=ax, color=INK, linewidth=linewidth, linestyle=(0, (3, 2)))
+    handles.append(plt.Line2D([], [], color=INK, linewidth=linewidth, linestyle=(0, (3, 2)),
+                              label="grid (predicted, gridfinder)"))
+    return handles
+
+
 def _map_axes(ax, gdf, title):
     xmin, ymin, xmax, ymax = gdf.total_bounds
     pad = 0.03 * max(xmax - xmin, ymax - ymin)
@@ -60,24 +75,23 @@ def _map_axes(ax, gdf, title):
 
 
 def plot_municipality(wards, buildings, grid, pilot_ward: int | None = None, ax=None):
-    """Wards shaded by building count, with the mapped grid and the pilot ward outlined."""
+    """Wards shaded by building count, with the grid and the pilot ward outlined."""
     if ax is None:
         _, ax = plt.subplots(figsize=(9, 9))
     counts = buildings.sjoin(wards[["WardNo", "geometry"]], predicate="within")["WardNo"].value_counts()
     wards = wards.assign(buildings=wards["WardNo"].map(counts).fillna(0))
     wards.plot(ax=ax, column="buildings", cmap=BLUES, edgecolor=SURFACE, linewidth=1.5,
                legend=True, legend_kwds={"label": "buildings per ward", "shrink": 0.6})
-    grid.clip(wards.buffer(5_000).union_all()).plot(ax=ax, color=INK, linewidth=1.2)
+    handles = _plot_grid(ax, grid, wards.buffer(5_000).union_all(), linewidth=1.2)
     if pilot_ward is not None:
         wards[wards["WardNo"] == pilot_ward].boundary.plot(ax=ax, color=UNSERVED, linewidth=2.5)
     for _, w in wards.iterrows():
         p = w.geometry.representative_point()
         ax.annotate(str(w["WardNo"]), (p.x, p.y), ha="center", va="center", fontsize=8, color=INK,
                     bbox={"boxstyle": "round,pad=0.2", "fc": SURFACE, "ec": "none", "alpha": 0.8})
-    ax.plot([], [], color=INK, linewidth=1.2, label="mapped grid")
     if pilot_ward is not None:
-        ax.plot([], [], color=UNSERVED, linewidth=2.5, label=f"pilot ward {pilot_ward}")
-    ax.legend(loc="lower left")
+        handles.append(plt.Line2D([], [], color=UNSERVED, linewidth=2.5, label=f"pilot ward {pilot_ward}"))
+    ax.legend(handles=handles, loc="lower left")
     _map_axes(ax, wards, "Ntabankulu (EC444): buildings per ward")
     return ax
 
@@ -96,7 +110,7 @@ def plot_grid_distance(pilot: Pilot, ax=None):
     ax.annotate(f"grid_distance_m = {pilot.cfg.grid_distance_m:,.0f}\n{share:.0%} of buildings beyond",
                 (cut_km, ax.get_ylim()[1] * 0.95), xytext=(6, 0), textcoords="offset points",
                 va="top", fontsize=9, color=INK_SECONDARY)
-    ax.set_xlabel("distance to nearest mapped grid line (km)")
+    ax.set_xlabel(f"distance to nearest grid line (km, {pilot.cfg.grid_source})")
     ax.set_ylabel("buildings")
     ax.grid(axis="x", visible=False)
     ax.legend(loc="upper right")
@@ -111,7 +125,7 @@ def plot_pilot(pilot: Pilot, x: np.ndarray | None = None, ax=None, title: str | 
         _, ax = plt.subplots(figsize=(9, 9))
     pilot.ward.plot(ax=ax, color="#f4f3f0", edgecolor=INK_SECONDARY, linewidth=1)
     pilot.buildings.plot(ax=ax, color=CONTEXT, markersize=0.4)
-    pilot.grid.clip(pilot.ward.buffer(2_000).union_all()).plot(ax=ax, color=INK, linewidth=1.5)
+    grid_handles = _plot_grid(ax, pilot.grid, pilot.ward.buffer(2_000).union_all())
 
     served = (problem.coverage[:, np.asarray(x, bool)].any(axis=1) if x is not None
               else np.zeros(len(pilot.nodes), bool))
@@ -133,14 +147,14 @@ def plot_pilot(pilot: Pilot, x: np.ndarray | None = None, ax=None, title: str | 
                     fontsize=8, color=INK, zorder=10,
                     bbox={"boxstyle": "round,pad=0.15", "fc": SURFACE, "ec": "none", "alpha": 0.85})
 
-    handles = [
-        plt.Line2D([], [], color=INK, linewidth=1.5, label="mapped grid"),
+    handles = grid_handles + [
         plt.Line2D([], [], marker="o", linestyle="", color=UNSERVED, label="far-from-grid demand, unserved"),
         plt.Line2D([], [], marker="^", linestyle="", markerfacecolor=SURFACE, markeredgecolor=INK_SECONDARY,
                    label="candidate site (qubit index)"),
     ]
     if x is not None:
-        handles[2:2] = [plt.Line2D([], [], marker="o", linestyle="", color=SERVED, label="served demand")]
+        handles.insert(len(grid_handles) + 1,
+                       plt.Line2D([], [], marker="o", linestyle="", color=SERVED, label="served demand"))
         handles.append(plt.Line2D([], [], marker="^", linestyle="", color=SERVED, markersize=10,
                                   label=f"selected site ({cfg.service_radius_m:,.0f} m reach)"))
     ax.legend(handles=handles, loc="lower left", fontsize=9)

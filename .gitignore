@@ -14,3 +14,7 @@ shapefiles/
 .DS_Store
 .env
 # Downloaded/cached datasets
+
+# Global gridfinder file (725 MB); the committed clip is data/raw/gridfinder_EC444.gpkg
+data/grid.gpkg
+data/raw/grid.gpkg

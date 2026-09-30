@@ -93,5 +93,5 @@ The first run takes about 3 minutes: it pulls every building in the municipality
 |---|---|---|
 | Wards | MDB Wards 2026 (`shapefiles/`) | Newer boundaries than Census 2022 |
 | Buildings | Overture Maps `2026-09-23.1` (Google, Microsoft, OSM) | Several structures per homestead; calibrate `households_per_building` against the census |
+| Grid (`--grid-source gridfinder`, default) | Arderne et al. 2020 predicted MV grid plus OSM lines, clipped to `data/raw/gridfinder_EC444.gpkg` | Predicted from night-time lights and roads (2020), so an estimate. The global 725 MB `grid.gpkg` from https://zenodo.org/records/3628142 is only needed to rebuild the clip and is gitignored |
 | Grid (`--grid-source osm`) | OSM power lines via Overpass | Mostly 132 kV transmission; the MV/LV distribution network is largely unmapped, so nearly everything counts as "far from the grid" |
-| Grid (`--grid-source gridfinder`) | Arderne et al. 2020 predicted MV grid | Put `grid.gpkg` (724 MB) from https://zenodo.org/records/3628142 in `data/raw/` |
