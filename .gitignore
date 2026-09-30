@@ -11,3 +11,4 @@ wheels/
 .idea/
 
 shapefiles/
+.DS_Store
