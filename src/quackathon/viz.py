@@ -249,3 +249,80 @@ def plot_sweep(values, served, total, xlabel: str, title: str, ax=None):
     ax.legend(loc="lower right")
     ax.set_title(title)
     return ax
+
+
+def plot_qaoa_distribution(result, n_top: int = 60, ax=None):
+    """Output probability of the tuned circuit over feasible selections, best energy first.
+
+    A good QAOA run piles probability on the left; the dashed line is random guessing.
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(9, 3.5))
+    idx = np.flatnonzero(result.feasible)
+    idx = idx[np.argsort(result.energies[idx])][:n_top]
+    probs = result.probabilities[idx]
+    colours = [SERVED if i == result.ground_state_index else CONTEXT for i in idx]
+    ax.bar(np.arange(len(idx)), probs, color=colours, width=0.8)
+    ax.axhline(result.p_ground_random, color=INK, linewidth=1, linestyle="--")
+    ax.annotate("random guess", (len(idx) - 1, result.p_ground_random), xytext=(0, 4),
+                textcoords="offset points", ha="right", fontsize=9, color=INK_SECONDARY)
+    ax.annotate(f"optimum: {result.p_ground:.1%}", (0, result.p_ground), xytext=(6, 2),
+                textcoords="offset points", fontsize=9, color=INK)
+    ax.set_xlabel(f"feasible selections ranked by energy (best {len(idx)} of {result.feasible.sum()})")
+    ax.set_ylabel("probability")
+    ax.grid(axis="x", visible=False)
+    ax.set_title(f"QAOA output distribution ({result.mixer} mixer, p={result.reps})")
+    return ax
+
+
+def plot_depth_sweep(sweeps: dict[str, list], metric: str = "p_ground", ax=None):
+    """One metric against QAOA depth, one line per mixer.
+
+    metric: "p_ground" (P(optimum), with each mixer's random-guess baseline dashed),
+    "approximation_ratio" or "p_feasible".
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 3.5))
+    labels = {"p_ground": "P(optimum)", "approximation_ratio": "approximation ratio",
+              "p_feasible": "P(feasible)"}
+    colours = {"xy": SERVED, "x": UNSERVED}
+    names = {"xy": "XY mixer (Dicke start)", "x": "X mixer (penalty)"}
+    for mixer, results in sweeps.items():
+        colour = colours.get(mixer, INK_SECONDARY)
+        depths = [r.reps for r in results]
+        ys = [getattr(r, metric) for r in results]
+        ax.plot(depths, ys, color=colour, marker="o", markersize=8, markeredgecolor=SURFACE,
+                label=names.get(mixer, mixer))
+        fmt = "{:.1%}" if metric != "approximation_ratio" else "{:.2f}"
+        ax.annotate(fmt.format(ys[-1]), (depths[-1], ys[-1]), xytext=(8, 0), textcoords="offset points",
+                    va="center", fontsize=9, color=INK_SECONDARY)
+        if metric == "p_ground":
+            ax.axhline(results[0].p_ground_random, color=colour, linewidth=1, linestyle="--")
+    if metric == "p_ground":
+        ax.plot([], [], color=INK_SECONDARY, linewidth=1, linestyle="--", label="random guess (same colour)")
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.1%}"))
+        ax.set_ylim(bottom=0)
+    if metric == "p_feasible":
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+        ax.set_ylim(0, 1.05)
+    ax.set_xticks(depths)
+    ax.set_xlim(depths[0] - 0.3, depths[-1] + 0.6)
+    ax.set_xlabel("QAOA depth p")
+    ax.set_ylabel(labels[metric])
+    ax.legend(loc="best", fontsize=9)
+    ax.set_title(labels[metric] + " vs depth")
+    return ax
+
+
+def plot_convergence(result, ax=None):
+    """Expected energy at each optimiser evaluation for the final depth."""
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 3.5))
+    ax.plot(result.history, color=SERVED, linewidth=1.5)
+    ax.axhline(result.ground_energy, color=INK, linewidth=1, linestyle="--")
+    ax.annotate("optimum energy", (len(result.history) - 1, result.ground_energy), xytext=(0, 4),
+                textcoords="offset points", ha="right", fontsize=9, color=INK_SECONDARY)
+    ax.set_xlabel("optimiser evaluation")
+    ax.set_ylabel("expected energy ⟨E⟩")
+    ax.set_title(f"COBYLA convergence (p={result.reps})")
+    return ax
