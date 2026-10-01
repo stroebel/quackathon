@@ -11,8 +11,8 @@ def main() -> None:
 
     from quackathon.app.runner import JobRunner
     from quackathon.app.views import App
+    from quackathon.app.wardmap import load_layers
     from quackathon.config import PilotConfig
-    from quackathon.region import load_wards
 
     runner = JobRunner(max_workers=2)
     try:
@@ -20,7 +20,7 @@ def main() -> None:
         # Callbacks run in the render loop below, on the main thread, like `App.poll`.
         dpg.configure_app(manual_callback_management=True)
         dpg.create_viewport(title="Microgrid siting explorer", width=1600, height=1000)
-        app = App(runner, sorted(int(w) for w in load_wards(PilotConfig())["WardNo"]))
+        app = App(runner, load_layers(PilotConfig()))
         app.build()
         dpg.setup_dearpygui()
         dpg.show_viewport()

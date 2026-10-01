@@ -45,11 +45,11 @@ most demand (about 2× ward 19), with ward 1 a close second.
 
 Ward 14 results (12 qubits, K = 3, depth 1–4):
 
-| | XY mixer | X mixer |
-|---|---|---|
-| P(optimum) | 0.9–1.2% (random 0.45%) | 0.0–0.2% |
-| P(feasible) | 100% | 2–28% |
-| Approximation ratio | 0.72–0.79 | < 0 |
+|                     | XY mixer                | X mixer  |
+|---------------------|-------------------------|----------|
+| P(optimum)          | 0.9–1.2% (random 0.45%) | 0.0–0.2% |
+| P(feasible)         | 100%                    | 2–28%    |
+| Approximation ratio | 0.72–0.79               | < 0      |
 
 On the 8-qubit toy (`n_candidates=8`), P(optimum) rises from 4.0% to 7.0% over depths
 1–4, against 1.8% for random.

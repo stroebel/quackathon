@@ -74,3 +74,40 @@ def fetch_buildings(area: gpd.GeoDataFrame, cache_dir: Path) -> gpd.GeoDataFrame
         crs="EPSG:4326",
     ).to_crs(METRIC_CRS)
     return pts[pts.within(area.union_all())].reset_index(drop=True)
+
+
+ROAD_CLASSES = "trunk|primary|secondary|tertiary|unclassified|track"
+
+
+def fetch_roads(area: gpd.GeoDataFrame, cache_dir: Path) -> gpd.GeoDataFrame:
+    """Roads and tracks within the bounding box of `area`, for site access."""
+    bbox = _bbox(area, 0)
+    query = f'[out:json][timeout:240];way["highway"~"^({ROAD_CLASSES})$"]({bbox});out geom;'
+    elements = _overpass(query, cache_dir / f"roads_{bbox}.json")
+    rows = [
+        {"osm_id": e["id"], "highway": e["tags"].get("highway"),
+         "geometry": LineString([(p["lon"], p["lat"]) for p in e["geometry"]])}
+        for e in elements if e["type"] == "way" and len(e.get("geometry", [])) >= 2
+    ]
+    return gpd.GeoDataFrame(rows, columns=["osm_id", "highway", "geometry"], geometry="geometry",
+                            crs="EPSG:4326").to_crs(METRIC_CRS)
+
+
+def fetch_facilities(area: gpd.GeoDataFrame, cache_dir: Path) -> gpd.GeoDataFrame:
+    """Clinics, hospitals and schools within the bounding box of `area`: possible anchor loads."""
+    bbox = _bbox(area, 0)
+    query = (f'[out:json][timeout:180];(nwr["amenity"~"^(clinic|hospital|doctors|school)$"]({bbox});'
+             f'nwr["healthcare"]({bbox}););out center;')
+    elements = _overpass(query, cache_dir / f"facilities_{bbox}.json")
+    rows = []
+    for e in elements:
+        point = (e["lon"], e["lat"]) if e["type"] == "node" else (e.get("center", {}).get("lon"),
+                                                                    e.get("center", {}).get("lat"))
+        if None in point:
+            continue
+        tags = e.get("tags", {})
+        kind = tags.get("amenity") or tags.get("healthcare")
+        rows.append({"osm_id": e["id"], "kind": "school" if kind == "school" else "health",
+                     "name": tags.get("name", ""), "geometry": Point(point)})
+    return gpd.GeoDataFrame(rows, columns=["osm_id", "kind", "name", "geometry"], geometry="geometry",
+                            crs="EPSG:4326").to_crs(METRIC_CRS)

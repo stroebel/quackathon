@@ -5,8 +5,10 @@ All Dear PyGui calls happen on the main thread. Slow work goes through `JobRunne
 """
 
 import re
+import threading
 import time
 from concurrent.futures import Future
+from dataclasses import replace
 from math import comb
 
 import dearpygui.dearpygui as dpg
@@ -17,6 +19,8 @@ import shapely
 from quackathon.app import jobs
 from quackathon.app.jobs import QAOAOptions, Run
 from quackathon.app.runner import JobRunner
+from quackathon.app.wardmap import (MuniLayers, circles_xy, colour_raster, grid_distances, is_predicted, lines_xy,
+                                    ward_at, ward_colours)
 from quackathon.classical import all_bitstrings, qubo_energies
 from quackathon.config import PilotConfig
 from quackathon.quantum import QAOAResult
@@ -36,6 +40,17 @@ SERVED = (70, 195, 145, 255)
 CANDIDATE = (230, 230, 230, 255)
 CHOSEN = (250, 200, 60, 255)
 REFERENCE = (160, 160, 160, 255)
+ROAD = (175, 140, 95, 140)
+HEALTH = (235, 110, 200, 255)
+SCHOOL = (120, 200, 235, 255)
+SELECTED = (250, 200, 60, 255)
+
+# Ward map colouring: (label, key, low value is better). Keys are MuniLayers.wards or screen columns.
+BASE_METRICS = [("buildings", "buildings", False), ("buildings / km2", "density", False)]
+SCREEN_METRICS = [("far demand (kWh/day)", "far_demand", False), ("served, candidates", "served", False),
+                  ("served, all nodes", "full_served", False), ("share of far demand served", "served_share", False),
+                  ("rank", "rank", True), ("demand excluded by predicted grid", "predicted_excluded_demand", False)]
+DEFAULT_ALLOCATION = 5
 
 
 def _series_theme(color, marker=None, size=None, weight=None, fill=None):
@@ -54,26 +69,20 @@ def _series_theme(color, marker=None, size=None, weight=None, fill=None):
     return theme
 
 
-def _lines_xy(geoms) -> tuple[list[float], list[float]]:
-    """Coordinates of every line or polygon ring, NaN-separated for one `skip_nan` line series."""
-    xs, ys = [], []
-    for geom in geoms:
-        for part in shapely.get_parts(geom):
-            rings = [part.exterior, *part.interiors] if part.geom_type == "Polygon" else [part]
-            for ring in rings:
-                c = np.asarray(ring.coords)
-                xs += [*c[:, 0], np.nan]
-                ys += [*c[:, 1], np.nan]
-    return xs, ys
+def _run_in_thread(fn, *args) -> Future:
+    """Run I/O-bound work (network fetches) in a daemon thread, so it never holds up a worker
+    process or the app closing."""
+    future = Future()
 
+    def target():
+        if future.set_running_or_notify_cancel():
+            try:
+                future.set_result(fn(*args))
+            except Exception as e:  # reported by the caller through future.exception()
+                future.set_exception(e)
 
-def _circles_xy(xy: np.ndarray, radius: float) -> tuple[list[float], list[float]]:
-    t = np.linspace(0, 2 * np.pi, 73)
-    xs, ys = [], []
-    for x, y in xy:
-        xs += [*(x + radius * np.cos(t)), np.nan]
-        ys += [*(y + radius * np.sin(t)), np.nan]
-    return xs, ys
+    threading.Thread(target=target, daemon=True).start()
+    return future
 
 
 def _sites_label(x: np.ndarray) -> str:
@@ -81,9 +90,18 @@ def _sites_label(x: np.ndarray) -> str:
 
 
 class App:
-    def __init__(self, runner: JobRunner, wards: list[int]):
+    def __init__(self, runner: JobRunner, muni: MuniLayers):
         self.runner = runner
-        self.wards = wards
+        self.muni = muni
+        self.wards = muni.ward_numbers
+        self.selected_wards: list[int] = [DEFAULT_WARD]
+        self.focus_ward: int | None = DEFAULT_WARD
+        self.metric = "buildings"
+        self.allocation_future: Future | None = None
+        self.allocation: pd.DataFrame | None = None
+        self.context_future: Future | None = None
+        self.context: dict | None = None  # roads, facilities, and per-ward summaries of them
+        self._hover: tuple | None = None
         self.runs: dict[int, Run] = {}
         self.futures: dict[int, Future] = {}  # run id -> future of its current stage
         self.active: int | None = None
@@ -94,6 +112,8 @@ class App:
         self.screen_future: Future | None = None
         self.screen: pd.DataFrame | None = None
         self.screen_sort: tuple[str, bool] = ("rank", True)
+        self.screen_cfg: PilotConfig | None = None      # settings the screen / allocation ran with
+        self.allocation_cfg: PilotConfig | None = None
         self._next_id = 1
         self._press = None
         self._unlock_axes_at: int | None = None
@@ -101,6 +121,7 @@ class App:
         self._dirty: set[str] = set()
         self._map_layers: dict[int, dict] = {}
         self._ground: dict[int, float] = {}
+        self._context_layers: dict[int, dict] = {}
         self._run_rows: dict[int, dict] = {}
         self._annotations: list[int] = []
         self._message = ""
@@ -118,11 +139,22 @@ class App:
             "reach": _series_theme(CHOSEN, weight=1.5),
             "reference": _series_theme(REFERENCE, weight=1.0),
             "bar": _series_theme(SERVED),
+            "excluded": _series_theme(UNSERVED, marker=dpg.mvPlotMarker_Circle, size=4.0, fill=(0, 0, 0, 0)),
+            "road": _series_theme(ROAD, weight=1.0),
+            "health": _series_theme(HEALTH, marker=dpg.mvPlotMarker_Square, size=4.0),
+            "school": _series_theme(SCHOOL, marker=dpg.mvPlotMarker_Diamond, size=4.0),
+            "selected": _series_theme(SELECTED, weight=3.0),
+            "run_site": _series_theme(CHOSEN, marker=dpg.mvPlotMarker_Up, size=7),
+            "alloc": _series_theme(SERVED, marker=dpg.mvPlotMarker_Up, size=9),
+            "alloc_reach": _series_theme(SERVED, weight=1.5),
             "optimum": _series_theme(CHOSEN),
             **{f"{kind}{size}": _series_theme(color, marker=dpg.mvPlotMarker_Circle, size=size)
                for kind, color in (("served", SERVED), ("unserved", UNSERVED)) for size in (2.5, 4.0, 6.0)},
         }
         defaults = PilotConfig()
+        height, width = self.muni.ward_index.shape
+        with dpg.texture_registry():
+            dpg.add_dynamic_texture(width, height, np.zeros(width * height * 4, np.float32), tag="ward_texture")
 
         with dpg.window(tag="main"):
             with dpg.group(horizontal=True):
@@ -136,7 +168,7 @@ class App:
                         with dpg.tab(label="Map"):
                             self._build_map_tab()
                         with dpg.tab(label="Sites"):
-                            dpg.add_text("", tag="sites_summary")
+                            dpg.add_text("", tag="sites_summary", wrap=1400)
                             dpg.add_table(tag="sites_table", header_row=True, row_background=True,
                                           borders_innerH=True, scrollY=True, policy=dpg.mvTable_SizingStretchProp)
                         with dpg.tab(label="Compare"):
@@ -154,9 +186,11 @@ class App:
             dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left, callback=self._on_mouse_up)
 
         self._update_size_hint()
+        self._draw_ward_map()
         self._draw_wards()
         self._refresh_run_table()
         self._refresh_active()
+        self.context_future = _run_in_thread(jobs.load_context, defaults)
 
     def _build_settings(self, d: PilotConfig) -> None:
         w = 150
@@ -209,6 +243,8 @@ class App:
             dpg.add_combo([], label="plan", tag="plan", width=160, callback=lambda s, a: self.set_plan(a))
             dpg.add_checkbox(label="buildings", tag="show_buildings", default_value=True,
                              callback=lambda s, a: self._draw_map(static=True))
+            dpg.add_checkbox(label="roads and facilities", tag="show_context", default_value=True,
+                             callback=lambda s, a: self._draw_map(static=True))
             dpg.add_button(label="Fit", callback=self._fit_map)
             dpg.add_button(label="Export plan (GeoJSON)", callback=self.export_plan)
         dpg.add_text("", tag="plan_summary")
@@ -243,13 +279,52 @@ class App:
 
     def _build_wards_tab(self) -> None:
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Screen all wards", callback=self.submit_screen)
-            dpg.add_text("Solves every ward classically with the Problem settings (ward is ignored). "
-                         "Click a ward to load it into the settings.", color=(150, 150, 150))
-        dpg.add_text("", tag="screen_status")
-        dpg.add_table(tag="ward_table", header_row=True, row_background=True, borders_innerH=True,
-                      sortable=True, scrollY=True, policy=dpg.mvTable_SizingStretchProp,
-                      callback=self._sort_wards)
+            with dpg.group(tag="wardmap_box"):  # plots cannot hold a tooltip, so it goes on this group
+                with dpg.plot(tag="wardmap", width=-560, height=-1, equal_aspects=True, no_title=True):
+                    dpg.add_plot_legend(location=dpg.mvPlot_Location_SouthWest)
+                    dpg.add_plot_axis(dpg.mvXAxis, tag="wardmap_x", no_tick_labels=True)
+                    dpg.add_plot_axis(dpg.mvYAxis, tag="wardmap_y", no_tick_labels=True)
+            with dpg.tooltip("wardmap_box"):
+                dpg.add_text("", tag="wardmap_tip")
+            with dpg.child_window(width=-1, border=False):
+                dpg.add_text("Click a ward to select it, shift-click to add or remove more. Drag to pan, "
+                             "scroll to zoom.", wrap=540, color=(150, 150, 150))
+                with dpg.group(horizontal=True):
+                    dpg.add_combo([label for label, _, _ in BASE_METRICS], label="colour by", tag="ward_metric",
+                                  default_value=BASE_METRICS[0][0], width=260,
+                                  callback=lambda s, a: self._set_metric(a))
+                    dpg.add_text("", tag="ward_metric_range", color=(150, 150, 150))
+                for row in ([("wm_grid_mapped", "mapped grid", True), ("wm_grid_predicted", "predicted grid", True),
+                             ("wm_roads", "roads", False), ("wm_facilities", "facilities", False)],
+                            [("wm_runs", "run results", True), ("wm_alloc", "best N", True)]):
+                    with dpg.group(horizontal=True):
+                        for tag, label, enabled in row:
+                            dpg.add_checkbox(label=label, tag=f"{tag}_on", default_value=True, enabled=enabled,
+                                             callback=self._apply_ward_layers)
+                dpg.add_text("", tag="context_status", color=(150, 150, 150), wrap=540)
+                dpg.add_separator()
+                with dpg.group(horizontal=True):
+                    dpg.add_text("", tag="ward_selection")
+                    dpg.add_button(label="Run selected", callback=self.submit_selected)
+                    dpg.add_button(label="Clear", callback=lambda: self._set_selection([]))
+                dpg.add_group(tag="ward_detail")
+                dpg.add_separator()
+                with dpg.group(horizontal=True):
+                    dpg.add_input_int(label="sites", tag="alloc_n", default_value=DEFAULT_ALLOCATION, width=90,
+                                      min_value=1, min_clamped=True)
+                    dpg.add_button(label="Best N across the municipality", callback=self.submit_allocation)
+                dpg.add_text("Best sites anywhere, ignoring ward boundaries (MILP with the Problem settings). "
+                             "Shows which wards should host the pilots.", wrap=540, color=(150, 150, 150))
+                dpg.add_text("", tag="alloc_status", wrap=540)
+                dpg.add_group(tag="alloc_list")
+                dpg.add_separator()
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Screen all wards", callback=self.submit_screen)
+                    dpg.add_text("Solves every ward classically with the Problem settings.", color=(150, 150, 150))
+                dpg.add_text("", tag="screen_status", wrap=540)
+                dpg.add_table(tag="ward_table", header_row=True, row_background=True, borders_innerH=True,
+                              sortable=True, scrollY=True, scrollX=True, height=-1,
+                              policy=dpg.mvTable_SizingFixedFit, callback=self._sort_wards)
 
     # ---------------------------------------------------------------- settings
 
@@ -304,6 +379,23 @@ class App:
         except ValueError as e:
             self._status(f"Invalid settings: {e}")
             return
+        self._submit(cfg, source, opts)
+
+    def submit_selected(self, *_):
+        """One run per selected ward, each with the current settings."""
+        if not self.selected_wards:
+            self._status("No wards selected. Click a ward on the map.")
+            return
+        try:
+            cfg, source, opts = self._read_settings()
+        except ValueError as e:
+            self._status(f"Invalid settings: {e}")
+            return
+        for ward in self.selected_wards:
+            self._submit(replace(cfg, ward_no=ward), source, opts)
+        self._status(f"Queued {len(self.selected_wards)} runs: wards {', '.join(map(str, self.selected_wards))}.")
+
+    def _submit(self, cfg: PilotConfig, source: str, opts: QAOAOptions | None) -> None:
         run = Run(self._next_id, cfg, source, opts)
         self._next_id += 1
         self.runs[run.id] = run
@@ -331,9 +423,25 @@ class App:
             self._status(f"Invalid settings: {e}")
             return
         self.screen_future = self.runner.submit("screen", jobs.screen_run, cfg)
+        self.screen_cfg = cfg
         dpg.set_value("screen_status", f"Screening wards (radius {cfg.service_radius_m:.0f} m, "
                                        f"grid distance {cfg.grid_distance_m:.0f} m, K={cfg.n_sites}, "
                                        f"N={cfg.n_candidates})...")
+
+    def submit_allocation(self, *_):
+        if self.allocation_future is not None:
+            return
+        try:
+            cfg, _, _ = self._read_settings()
+        except ValueError as e:
+            self._status(f"Invalid settings: {e}")
+            return
+        n = dpg.get_value("alloc_n")
+        self.allocation_future = self.runner.submit("allocate", jobs.allocate_run, cfg, n)
+        self.allocation_cfg = cfg
+        dpg.set_value("alloc_status", f"Finding the best {n} sites across the municipality "
+                                      f"(radius {cfg.service_radius_m:.0f} m, grid distance "
+                                      f"{cfg.grid_distance_m:.0f} m)...")
 
     def poll(self) -> None:
         """Once per frame: apply progress messages and finished jobs."""
@@ -348,8 +456,14 @@ class App:
         for key, future in done:
             if key == "screen":
                 self._finish_screen(future)
+            elif key == "allocate":
+                self._finish_allocation(future)
             else:
                 self._finish_stage(*key, future)
+
+        if self.context_future is not None and self.context_future.done():
+            self._finish_context(self.context_future)
+        self._update_ward_tooltip()
 
         for run_id, future in self.futures.items():
             run = self.runs[run_id]
@@ -371,6 +485,9 @@ class App:
                 self._refresh_run_table()
             if "qaoa" in self._dirty:
                 self._draw_qaoa()
+            if "overlays" in self._dirty:
+                self._draw_ward_overlays()
+                self._draw_ward_detail()
             self._dirty.clear()
             self._status()
 
@@ -400,6 +517,7 @@ class App:
         else:
             run.sweep = future.result()
             run.status, run.finished = "done", time.perf_counter()
+        self._dirty.add("overlays")
         if run_id == self.active:
             self._refresh_active()
 
@@ -410,7 +528,54 @@ class App:
             return
         self.screen = future.result()
         dpg.set_value("screen_status", f"{len(self.screen)} wards screened.")
+        dpg.configure_item("ward_metric", items=[label for label, _, _ in BASE_METRICS + SCREEN_METRICS])
         self._draw_wards()
+        self._recolour_wards()
+        self._draw_ward_detail()
+
+    def _finish_allocation(self, future: Future) -> None:
+        self.allocation_future = None
+        if (exc := future.exception()) is not None:
+            dpg.set_value("alloc_status", f"Allocation failed: {type(exc).__name__}: {exc}")
+            return
+        self.allocation = future.result()
+        total = self.allocation["serves_kwh_day"].sum()
+        wards = sorted(set(self.allocation["WardNo"].astype(int)))
+        dpg.set_value("alloc_status", f"{len(self.allocation)} sites serve {total:.1f} kWh/day, in wards "
+                                      f"{', '.join(map(str, wards))}. Click a site to select its ward.")
+        dpg.delete_item("alloc_list", children_only=True)
+        for i, row in self.allocation.iterrows():
+            dpg.add_selectable(label=f"site {i}: ward {int(row['WardNo'])}, {row['serves_kwh_day']:.1f} kWh/day",
+                               parent="alloc_list", user_data=int(row["WardNo"]),
+                               callback=lambda s, a, u: (dpg.set_value(s, False), self.select_ward(u)))
+        self._draw_ward_overlays()
+
+    def _finish_context(self, future: Future) -> None:
+        self.context_future = None
+        if (exc := future.exception()) is not None:
+            dpg.set_value("context_status", f"Roads and facilities unavailable: {type(exc).__name__}: {exc}")
+            return
+        roads, facilities = future.result()["roads"], future.result()["facilities"]
+        wards = self.muni.wards
+        in_ward = facilities.sjoin(wards[["WardNo", "geometry"]], predicate="within")
+        self.context = {
+            "roads": roads,
+            "roads_union": roads.geometry.union_all() if len(roads) else None,
+            "facilities": facilities,
+            "facilities_xy": np.column_stack([facilities.geometry.x, facilities.geometry.y]),
+            "ward_facilities": in_ward.groupby(["WardNo", "kind"]).size(),
+            "ward_road_km": {int(w): float(roads.clip(g).length.sum() / 1000)
+                             for w, g in zip(wards["WardNo"], wards.geometry)},
+        }
+        dpg.set_value("context_status", f"OSM: {len(roads):,} road and track segments, "
+                                        f"{len(facilities)} clinics, hospitals and schools.")
+        for tag in ("wm_roads", "wm_facilities"):
+            dpg.configure_item(f"{tag}_on", enabled=True)
+        self._draw_ward_context()
+        self._draw_ward_detail()
+        if self.active is not None:
+            self._draw_map(static=True)
+            self._draw_sites()
 
     def _status(self, message: str | None = None) -> None:
         if message is not None:
@@ -452,6 +617,7 @@ class App:
             self.plan, self.manual, self.sample, self.qaoa_depth = "Exact", None, None, None
         self._refresh_run_table()
         self._refresh_active()
+        self._dirty.add("overlays")
         run = self.runs[run_id]
         self._status(f"Run {run_id} failed: {run.error}" if run.error else "")
 
@@ -483,6 +649,7 @@ class App:
         self.plan = name
         self._draw_map()
         self._draw_sites()
+        self._dirty.add("overlays")
 
     def toggle_site(self, j: int) -> None:
         run = self.runs.get(self.active)
@@ -496,27 +663,60 @@ class App:
         self._draw_map()
         self._draw_sites()
         self._draw_compare()
+        self._dirty.add("overlays")
 
     # ---------------------------------------------------------------- map
 
     def _layers(self, run: Run) -> dict:
         """Static map geometry for a run, computed once."""
         if run.id not in self._map_layers:
-            pilot = run.build.pilot
+            pilot, cfg = run.build.pilot, run.cfg
             grid = pilot.grid.clip(pilot.ward.buffer(2_000).union_all())
-            predicted = grid["source"].eq("gridfinder") if "source" in grid else pd.Series(False, grid.index)
+            predicted = is_predicted(grid)
             nodes_xy = np.column_stack([pilot.nodes.geometry.x, pilot.nodes.geometry.y])
             demand = pilot.nodes["demand_kwh_day"].to_numpy()
+            # Nodes left out only because a predicted line is near: demand missed if gridfinder is wrong.
+            mapped_d, _ = grid_distances(pilot.all_nodes.geometry, pilot.grid)
+            near_any = (pilot.all_nodes.distance(pilot.grid.union_all()) <= cfg.grid_distance_m).to_numpy()
+            excluded = pilot.all_nodes[near_any & (mapped_d > cfg.grid_distance_m)]
+            site_mapped, site_predicted = grid_distances(pilot.sites.geometry, pilot.grid)
             self._map_layers[run.id] = {
-                "ward": _lines_xy(pilot.ward.geometry),
-                "grid_mapped": _lines_xy(grid.geometry[~predicted]),
-                "grid_predicted": _lines_xy(grid.geometry[predicted]),
+                "ward": lines_xy(pilot.ward.geometry),
+                "grid_mapped": lines_xy(grid.geometry[~predicted]),
+                "grid_predicted": lines_xy(grid.geometry[predicted]),
                 "buildings": (pilot.buildings.geometry.x.tolist(), pilot.buildings.geometry.y.tolist()),
                 "nodes": nodes_xy,
                 "node_bin": np.digitize(demand, np.quantile(demand, [1 / 3, 2 / 3])),
                 "sites": np.column_stack([pilot.sites.geometry.x, pilot.sites.geometry.y]),
+                "site_mapped_m": site_mapped,
+                "site_predicted_m": site_predicted,
+                "excluded": (excluded.geometry.x.tolist(), excluded.geometry.y.tolist()),
+                "excluded_kwh_day": float(excluded["demand_kwh_day"].sum()),
             }
         return self._map_layers[run.id]
+
+    def _run_context(self, run: Run) -> dict | None:
+        """Roads and facilities around a run's ward, and per-site access, once OSM has loaded."""
+        if self.context is None:
+            return None
+        if run.id not in self._context_layers:
+            pilot, c = run.build.pilot, self.context
+            area = pilot.ward.buffer(2_000).union_all()
+            roads = c["roads"].clip(area)
+            fac = c["facilities"][c["facilities"].within(area)]
+            sites = self._layers(run)["sites"]
+            road_d = (pilot.sites.distance(c["roads_union"]).to_numpy() if c["roads_union"] is not None
+                      else np.full(len(sites), np.inf))
+            fxy = c["facilities_xy"]
+            d = np.hypot(sites[:, None, 0] - fxy[None, :, 0], sites[:, None, 1] - fxy[None, :, 1])
+            self._context_layers[run.id] = {
+                "roads": lines_xy(roads.geometry),
+                **{kind: (fac.geometry.x[fac["kind"] == kind].tolist(), fac.geometry.y[fac["kind"] == kind].tolist())
+                   for kind in ("health", "school")},
+                "site_road_m": road_d,
+                "site_facilities": (d <= run.cfg.service_radius_m).sum(axis=1),
+            }
+        return self._context_layers[run.id]
 
     def _draw_map(self, static: bool = False, fit: bool = False) -> None:
         run = self.runs.get(self.active)
@@ -547,8 +747,21 @@ class App:
             for key, label in [("ward", "ward"), ("grid_mapped", "grid (mapped)"),
                                ("grid_predicted", "grid (predicted, gridfinder)")]:
                 if layers[key][0]:
-                    dpg.add_line_series(*layers[key], label=label, parent="map_y", skip_nan=True)
+                    dpg.add_line_series(*layers[key], label=label, parent="map_y")
                     dpg.bind_item_theme(dpg.last_item(), self.themes[key])
+            ctx = self._run_context(run)
+            if ctx is not None and dpg.get_value("show_context"):
+                if ctx["roads"][0]:
+                    dpg.add_line_series(*ctx["roads"], label="roads (OSM)", parent="map_y")
+                    dpg.bind_item_theme(dpg.last_item(), self.themes["road"])
+                for kind, label in (("health", "clinic / hospital"), ("school", "school")):
+                    if ctx[kind][0]:
+                        dpg.add_scatter_series(*ctx[kind], label=label, parent="map_y")
+                        dpg.bind_item_theme(dpg.last_item(), self.themes[kind])
+            if layers["excluded"][0]:
+                dpg.add_scatter_series(*layers["excluded"], label="excluded only by predicted grid",
+                                       parent="map_y")
+                dpg.bind_item_theme(dpg.last_item(), self.themes["excluded"])
             if dpg.get_value("show_buildings"):
                 dpg.add_scatter_series(*layers["buildings"], label="buildings", parent="map_y")
                 dpg.bind_item_theme(dpg.last_item(), self.themes["building"])
@@ -571,7 +784,7 @@ class App:
                     dpg.bind_item_theme(dpg.last_item(), self.themes[f"{kind}{size}"])
         chosen = layers["sites"][x.astype(bool)]
         if len(chosen):
-            dpg.add_line_series(*_circles_xy(chosen, cfg.service_radius_m), parent="map_y", skip_nan=True,
+            dpg.add_line_series(*circles_xy(chosen, cfg.service_radius_m), parent="map_y",
                                 label=f"reach ({cfg.service_radius_m:,.0f} m)", user_data="plan")
             dpg.bind_item_theme(dpg.last_item(), self.themes["reach"])
             dpg.add_scatter_series(chosen[:, 0].tolist(), chosen[:, 1].tolist(), label="chosen site",
@@ -588,7 +801,9 @@ class App:
         best = p.served_demand(run.build.exact.x)
         text = (f"Ward {run.cfg.ward_no}, {self.plan}: sites {_sites_label(x)}. "
                 f"Serves {served:.1f} of {total:.1f} kWh/day ({served / total:.0%}), "
-                f"{best - served:.1f} kWh/day below the optimum.")
+                f"{best - served:.1f} kWh/day below the optimum. "
+                f"{self._layers(run)['excluded_kwh_day']:.1f} kWh/day more is excluded only by predicted "
+                f"grid lines (hollow red).")
         if not p.is_feasible(x):
             text += f" Not a valid plan: {int(x.sum())} sites, need {p.n_select}."
         return text
@@ -630,7 +845,7 @@ class App:
     # ---------------------------------------------------------------- mouse
 
     def _on_mouse_down(self, *_):
-        for plot in ("map", "dist"):
+        for plot in ("map", "dist", "wardmap"):
             if dpg.is_item_hovered(plot):
                 self._press = (plot, dpg.get_mouse_pos(local=False), dpg.get_plot_mouse_pos())
                 return
@@ -643,6 +858,10 @@ class App:
         plot, screen_xy, (px, py) = press
         if np.hypot(*np.subtract(dpg.get_mouse_pos(local=False), screen_xy)) > CLICK_TOLERANCE_PX:
             return  # a drag (pan), not a click
+        if plot == "wardmap":
+            if (ward := ward_at(self.muni.wards, px, py)) is not None:
+                self.select_ward(ward, toggle=self._shift_down())
+            return
         run = self.runs.get(self.active)
         if run is None or run.build is None:
             return
@@ -658,6 +877,7 @@ class App:
             if 0 <= rank < min(N_TOP_STATES, len(order)):
                 self.sample = (rank, all_bitstrings(run.problem.n_sites)[order[rank]])
                 self.plan = f"QAOA #{rank}"
+                self._dirty.add("overlays")
                 self._draw_map()
                 self._draw_sites()
                 self._draw_qaoa_sample(run, res, rank)
@@ -673,16 +893,26 @@ class App:
             return
         pilot, p = run.build.pilot, run.problem
         qaoa_x = run.sweep[-1].x if run.sweep else np.zeros(p.n_sites, np.int8)
-        # Each candidate site is a demand node; its grid distance is that node's.
-        node_of_site = np.argmin(p.distance, axis=0)
-        grid_d = pilot.nodes["grid_distance_m"].to_numpy()[node_of_site]
+        layers, ctx = self._layers(run), self._run_context(run)
+        mapped_d, predicted_d = layers["site_mapped_m"], layers["site_predicted_m"]
+        cutoff = run.cfg.grid_distance_m
         base = p.served_demand(x)
         dpg.set_value("sites_summary", f"{self.plan}: {_sites_label(x)}. Click a site number to zoom the map; "
                                        f"tick 'in plan' to edit a Manual plan. Delta = change in served "
-                                       f"demand if this site is toggled.")
-        for label in ("site", "reachable kWh/day", "nodes in reach", "grid distance (m)", "delta kWh/day",
-                      "exact", "QAOA", "in plan"):
+                                       f"demand if this site is toggled. 'check' flags a predicted line within "
+                                       f"{2 * cutoff:,.0f} m (2x the cut-off): confirm on the ground that it is "
+                                       f"not already on the grid."
+                                       + ("" if ctx else " Road and facility columns appear once OSM loads."))
+        columns = ["site", "reachable kWh/day", "nodes in reach", "mapped grid (m)", "predicted grid (m)", "check"]
+        if ctx:
+            columns += ["road (m)", "facilities in reach"]
+        columns += ["delta kWh/day", "exact", "QAOA", "in plan"]
+        for label in columns:
             dpg.add_table_column(label=label, parent=table)
+
+        def metres(d):
+            return f"{d:,.0f}" if np.isfinite(d) else "-"
+
         for j in range(p.n_sites):
             toggled = x.copy()
             toggled[j] ^= 1
@@ -691,7 +921,12 @@ class App:
                                    callback=lambda s, a, u: (self._centre_map(u), dpg.set_value(s, False)))
                 dpg.add_text(f"{pilot.sites['reachable_kwh_day'].iloc[j]:.1f}")
                 dpg.add_text(str(int(p.coverage[:, j].sum())))
-                dpg.add_text(f"{grid_d[j]:,.0f}")
+                dpg.add_text(metres(mapped_d[j]))
+                dpg.add_text(metres(predicted_d[j]))
+                dpg.add_text("predicted line near" if predicted_d[j] < 2 * cutoff else "", color=UNSERVED)
+                if ctx:
+                    dpg.add_text(metres(ctx["site_road_m"][j]))
+                    dpg.add_text(str(int(ctx["site_facilities"][j])))
                 delta = p.served_demand(toggled) - base
                 dpg.add_text(f"{delta:+.1f}", color=SERVED if delta > 0 else (UNSERVED if delta < 0 else REFERENCE))
                 dpg.add_text("yes" if run.build.exact.x[j] else "")
@@ -830,13 +1065,221 @@ class App:
                                      f"{res.counts.get(format(index, f'0{p.n_sites}b'), 0)} of {res.shots} shots. "
                                      f"Shown on the map as '{self.plan}'.")
 
-    # ---------------------------------------------------------------- wards
+    # ---------------------------------------------------------------- ward map
+
+    @staticmethod
+    def _shift_down() -> bool:
+        return dpg.is_key_down(dpg.mvKey_LShift) or dpg.is_key_down(dpg.mvKey_RShift)
+
+    def _draw_ward_map(self) -> None:
+        """Static layers of the municipality map, drawn once."""
+        m, parent = self.muni, "wardmap_y"
+        x0, y0, x1, y1 = m.bounds
+        dpg.add_image_series("ward_texture", (x0, y0), (x1, y1), parent=parent)
+        dpg.add_line_series(*m.outline_xy, label="ward", parent=parent)
+        dpg.bind_item_theme(dpg.last_item(), self.themes["ward"])
+        dpg.add_line_series(*m.grid_mapped_xy, label="grid (mapped)", parent=parent,
+                            tag="wm_grid_mapped")
+        dpg.bind_item_theme(dpg.last_item(), self.themes["grid_mapped"])
+        dpg.add_line_series(*m.grid_predicted_xy, label="grid (predicted, gridfinder)", parent=parent,
+                            segments=True, tag="wm_grid_predicted")
+        dpg.bind_item_theme(dpg.last_item(), self.themes["grid_predicted"])
+        dpg.add_line_series([], [], label="selected", parent=parent, tag="wm_selected")
+        dpg.bind_item_theme(dpg.last_item(), self.themes["selected"])
+        for ward, lx, ly in zip(m.wards["WardNo"], m.wards["label_x"], m.wards["label_y"]):
+            dpg.add_plot_annotation(label=str(ward), default_value=(lx, ly), color=(40, 40, 40, 200),
+                                    parent="wardmap")
+        self._recolour_wards()
+        self._draw_selection()
+        self._draw_ward_detail()
+        dpg.fit_axis_data("wardmap_x")
+        dpg.fit_axis_data("wardmap_y")
+
+    def _draw_ward_context(self) -> None:
+        """Roads and facilities on the municipality map, once OSM has loaded."""
+        c, parent = self.context, "wardmap_y"
+        roads = c["roads"].clip(self.muni.wards.buffer(2_000).union_all())
+        dpg.add_line_series(*lines_xy(roads.geometry), label="roads (OSM)", parent=parent,
+                            tag="wm_roads", before="wm_selected")
+        dpg.bind_item_theme(dpg.last_item(), self.themes["road"])
+        fac = c["facilities"][c["facilities"].within(self.muni.wards.buffer(2_000).union_all())]
+        for kind, label in (("health", "clinic / hospital"), ("school", "school")):
+            f = fac[fac["kind"] == kind]
+            dpg.add_scatter_series(f.geometry.x.tolist(), f.geometry.y.tolist(), label=label, parent=parent,
+                                   tag=f"wm_facilities_{kind}", before="wm_selected")
+            dpg.bind_item_theme(dpg.last_item(), self.themes[kind])
+        self._apply_ward_layers()
+
+    def _apply_ward_layers(self, *_) -> None:
+        for tag in ("wm_grid_mapped", "wm_grid_predicted", "wm_roads", "wm_facilities_health",
+                    "wm_facilities_school"):
+            if dpg.does_item_exist(tag):
+                toggle = tag.removesuffix("_health").removesuffix("_school")
+                dpg.configure_item(tag, show=dpg.get_value(f"{toggle}_on"))
+        self._draw_ward_overlays()
+
+    def _metric_values(self) -> tuple[np.ndarray, bool]:
+        """The colour metric for each ward, in `muni.wards` order, and whether low is better."""
+        wards = self.muni.wards
+        if self.metric == "buildings":
+            return wards["buildings"].to_numpy(float), False
+        if self.metric == "density":
+            return (wards["buildings"] / wards["area_km2"]).to_numpy(float), False
+        low_better = dict((k, r) for _, k, r in SCREEN_METRICS)[self.metric]
+        values = self.screen[self.metric].reindex(wards["WardNo"]).astype(float).to_numpy()
+        return values, low_better
+
+    def _set_metric(self, label: str) -> None:
+        self.metric = {lab: key for lab, key, _ in BASE_METRICS + SCREEN_METRICS}[label]
+        dpg.set_value("ward_metric", label)
+        self._recolour_wards()
+
+    def _recolour_wards(self) -> None:
+        values, low_better = self._metric_values()
+        selected = self.muni.wards["WardNo"].isin(self.selected_wards).to_numpy()
+        colours = ward_colours(values, highlight=selected, reverse=low_better)
+        dpg.set_value("ward_texture", colour_raster(self.muni.ward_index, colours))
+        ok = np.isfinite(values)
+        if ok.any():
+            lo, hi = values[ok].min(), values[ok].max()
+            fmt = "{:.0%}" if self.metric == "served_share" else "{:,.0f}" if hi >= 100 else "{:,.1f}"
+            first, last = (hi, lo) if low_better else (lo, hi)
+            dpg.set_value("ward_metric_range", f"dark {fmt.format(first)} to light {fmt.format(last)}"
+                          + ("" if ok.all() else "; grey = no value"))
+
+    def select_ward(self, ward: int, toggle: bool = False) -> None:
+        if toggle:
+            selected = [w for w in self.selected_wards if w != ward]
+            if len(selected) == len(self.selected_wards):
+                selected.append(ward)
+        else:
+            selected = [ward]
+        self.focus_ward = ward
+        self._set_selection(selected)
+
+    def _set_selection(self, wards: list[int]) -> None:
+        self.selected_wards = sorted(wards)
+        if self.focus_ward not in self.selected_wards:
+            self.focus_ward = self.selected_wards[-1] if self.selected_wards else None
+        if self.focus_ward is not None:
+            dpg.set_value("ward", str(self.focus_ward))
+        self._recolour_wards()
+        self._draw_selection()
+        self._draw_ward_detail()
+        self._draw_wards()
+
+    def _draw_selection(self) -> None:
+        wards = self.muni.wards
+        geoms = wards.geometry[wards["WardNo"].isin(self.selected_wards)]
+        dpg.set_value("wm_selected", list(lines_xy(geoms)))
+        label = ", ".join(map(str, self.selected_wards)) or "none"
+        dpg.set_value("ward_selection", f"Selected: {label}")
+
+    def _update_ward_tooltip(self) -> None:
+        if not dpg.is_item_hovered("wardmap"):
+            self._hover = None
+            return
+        pos = tuple(dpg.get_plot_mouse_pos())
+        if pos == self._hover:
+            return
+        self._hover = pos
+        ward = ward_at(self.muni.wards, *pos)
+        dpg.set_value("wardmap_tip", self._ward_tip(ward) if ward is not None else "outside the municipality")
+
+    def _ward_tip(self, ward: int) -> str:
+        row = self.muni.row(ward)
+        text = f"Ward {ward}: {row['buildings']:,} buildings, {row['area_km2']:.0f} km2"
+        if self.screen is not None and ward in self.screen.index:
+            s = self.screen.loc[ward]
+            text += f"\nfar demand {s['far_demand']:.1f} kWh/day"
+            if pd.notna(s.get("served")):
+                text += f", best K serves {s['served']:.1f} (rank {int(s['rank'])})"
+        return text + "\nclick to select, shift-click to add"
+
+    def _draw_ward_detail(self) -> None:
+        parent = "ward_detail"
+        dpg.delete_item(parent, children_only=True)
+        ward = self.focus_ward
+        if ward is None:
+            dpg.add_text("No ward selected.", parent=parent)
+            return
+        row = self.muni.row(ward)
+        lines = [f"Ward {ward} (WardID {row['WardID']}): {row['area_km2']:.0f} km2, {row['buildings']:,} buildings "
+                 f"({row['buildings'] / row['area_km2']:.0f} per km2)."]
+        if self.screen is not None and ward in self.screen.index:
+            s, cfg = self.screen.loc[ward], self.screen_cfg
+            lines.append(f"Beyond {cfg.grid_distance_m:,.0f} m of the grid: {int(s['far_nodes'])} demand nodes, "
+                         f"{int(s['far_buildings']):,} buildings, about {s['far_households']:,.0f} households, "
+                         f"{s['far_demand']:.1f} kWh/day.")
+            if pd.notna(s.get("served")):
+                lines.append(f"Best {cfg.n_sites} of {cfg.n_candidates} candidates serve {s['served']:.1f} kWh/day "
+                             f"({s['served_share']:.0%}), rank {int(s['rank'])} of {len(self.screen)}. "
+                             f"With every node a candidate: {s['full_served']:.1f}.")
+            else:
+                lines.append(f"Not eligible: fewer than {cfg.n_candidates} far-from-grid nodes.")
+            lines.append(f"A further {s['predicted_excluded_demand']:.1f} kWh/day is near a predicted line only "
+                         f"(missed if gridfinder is wrong).")
+        else:
+            lines.append("Screen all wards for demand and served figures.")
+        if self.context is not None:
+            fac = self.context["ward_facilities"]
+            n_health, n_school = (int(fac.get((ward, k), 0)) for k in ("health", "school"))
+            lines.append(f"OSM: {n_health} clinics / hospitals, {n_school} schools, "
+                         f"{self.context['ward_road_km'].get(ward, 0):,.0f} km of roads and tracks.")
+        for line in lines:
+            dpg.add_text(line, parent=parent, wrap=540)
+        runs = [r for r in self.runs.values() if r.cfg.ward_no == ward]
+        if runs:
+            dpg.add_text("Runs on this ward (click to open):", parent=parent)
+        for run in sorted(runs, key=lambda r: -r.id):
+            served = f", exact serves {run.problem.served_demand(run.build.exact.x):.1f} kWh/day" if run.build else ""
+            dpg.add_selectable(label=f"  run {run.id}: K={run.cfg.n_sites}, R={run.cfg.service_radius_m:,.0f} m, "
+                                     f"{run.progress}{served}", parent=parent, user_data=run.id,
+                               callback=lambda s, a, u: (dpg.set_value(s, False), self.select_run(u)))
+
+    def _draw_ward_overlays(self) -> None:
+        """Sites from finished runs and the municipality-wide allocation."""
+        for item in dpg.get_item_children("wardmap_y", slot=1) or []:
+            if dpg.get_item_user_data(item) == "overlay":
+                dpg.delete_item(item)
+        parent = "wardmap_y"
+        if dpg.get_value("wm_runs_on"):
+            done = [r for r in self.runs.values() if r.build is not None and r.id != self.active]
+            xy = [self._layers(r)["sites"][r.build.exact.x.astype(bool)] for r in done]
+            if xy:
+                xy = np.vstack(xy)
+                dpg.add_scatter_series(xy[:, 0].tolist(), xy[:, 1].tolist(), label="run optimum sites",
+                                       parent=parent, user_data="overlay", before="wm_selected")
+                dpg.bind_item_theme(dpg.last_item(), self.themes["candidate"])
+            run, x = self.runs.get(self.active), self.current_plan()
+            if run is not None and x is not None:
+                chosen = self._layers(run)["sites"][x.astype(bool)]
+                if len(chosen):
+                    dpg.add_line_series(*circles_xy(chosen, run.cfg.service_radius_m), parent=parent, label=f"run {run.id} {self.plan} reach", user_data="overlay",
+                                        before="wm_selected")
+                    dpg.bind_item_theme(dpg.last_item(), self.themes["reach"])
+                    dpg.add_scatter_series(chosen[:, 0].tolist(), chosen[:, 1].tolist(),
+                                           label=f"run {run.id} {self.plan} sites", parent=parent,
+                                           user_data="overlay", before="wm_selected")
+                    dpg.bind_item_theme(dpg.last_item(), self.themes["run_site"])
+        if self.allocation is not None and dpg.get_value("wm_alloc_on"):
+            a = self.allocation
+            xy = np.column_stack([a.geometry.x, a.geometry.y])
+            radius = self.allocation_cfg.service_radius_m
+            dpg.add_line_series(*circles_xy(xy, radius), parent=parent,
+                                label=f"best {len(a)} reach", user_data="overlay", before="wm_selected")
+            dpg.bind_item_theme(dpg.last_item(), self.themes["alloc_reach"])
+            dpg.add_scatter_series(xy[:, 0].tolist(), xy[:, 1].tolist(), label=f"best {len(a)} sites (municipality)",
+                                   parent=parent, user_data="overlay", before="wm_selected")
+            dpg.bind_item_theme(dpg.last_item(), self.themes["alloc"])
+
+    # ---------------------------------------------------------------- wards table
 
     WARD_COLUMNS = [("ward", "ward", "{}"), ("rank", "rank", "{}"), ("buildings", "buildings", "{:,}"),
                     ("far_nodes", "far nodes", "{}"), ("far_demand", "far demand", "{:.1f}"),
                     ("served", "served (candidates)", "{:.1f}"), ("full_served", "served (all nodes)", "{:.1f}"),
-                    ("served_share", "share", "{:.0%}"), ("candidate_gap", "candidate gap", "{:.1%}"),
-                    ("greedy_gap", "greedy gap", "{:.1%}")]
+                    ("served_share", "share", "{:.0%}"), ("predicted_excluded_demand", "excl. by predicted", "{:.1f}"),
+                    ("candidate_gap", "candidate gap", "{:.1%}"), ("greedy_gap", "greedy gap", "{:.1%}")]
 
     def _sort_wards(self, sender, sort_specs):
         if not sort_specs:
@@ -862,12 +1305,9 @@ class App:
                     value = row[col]
                     text = "-" if pd.isna(value) else fmt.format(int(value) if fmt in ("{}", "{:,}") else value)
                     if i == 0:
-                        dpg.add_selectable(label=text, span_columns=True, user_data=int(row["ward"]),
-                                           callback=lambda s, a, u: self._use_ward(s, u))
+                        ward = int(row["ward"])
+                        dpg.add_selectable(label=text, span_columns=True, user_data=ward,
+                                           default_value=ward in self.selected_wards,
+                                           callback=lambda s, a, u: self.select_ward(u, toggle=self._shift_down()))
                     else:
                         dpg.add_text(text)
-
-    def _use_ward(self, sender, ward: int) -> None:
-        dpg.set_value(sender, False)
-        dpg.set_value("ward", str(ward))
-        self._status(f"Ward {ward} loaded into the settings. Press Run to solve it.")

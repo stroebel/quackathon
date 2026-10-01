@@ -80,6 +80,22 @@ def screen_run(cfg: PilotConfig) -> pd.DataFrame:
     return screen_wards(Municipality.load(cfg), cfg)
 
 
+def allocate_run(cfg: PilotConfig, n_total: int) -> pd.DataFrame:
+    """Best `n_total` sites anywhere in the municipality (see `screening.allocate_sites`)."""
+    from quackathon.screening import Municipality, allocate_sites
+
+    return allocate_sites(Municipality.load(cfg), cfg, n_total)
+
+
+def load_context(cfg: PilotConfig) -> dict:
+    """OSM roads and facilities for the municipality. The first call downloads them (minutes)."""
+    from quackathon.osm import fetch_facilities, fetch_roads
+    from quackathon.region import load_wards
+
+    wards = load_wards(cfg)
+    return {"roads": fetch_roads(wards, cfg.raw_dir), "facilities": fetch_facilities(wards, cfg.raw_dir)}
+
+
 @dataclass
 class Run:
     """One optimisation run, as the GUI tracks it."""

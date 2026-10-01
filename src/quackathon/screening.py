@@ -36,13 +36,19 @@ class Municipality:
         buildings = buildings.sjoin(wards[["WardNo", "geometry"]], predicate="within").drop(columns="index_right")
         return cls(wards, load_grid(wards, cfg), buildings.reset_index(drop=True), cfg.grid_source)
 
-    def far_nodes(self, cfg: PilotConfig) -> gpd.GeoDataFrame:
-        """Far-from-grid demand nodes of every ward, clustered ward by ward as in `build_pilot`."""
+    def far_nodes(self, cfg: PilotConfig, mapped_only: bool = False) -> gpd.GeoDataFrame:
+        """Far-from-grid demand nodes of every ward, clustered ward by ward as in `build_pilot`.
+
+        `mapped_only` ignores gridfinder's predicted lines, to see what demand they exclude.
+        """
         if cfg.grid_source != self.grid_source:
             raise ValueError(f"loaded with grid_source={self.grid_source!r}, config has {cfg.grid_source!r}")
+        grid = self.grid
+        if mapped_only and "source" in grid:
+            grid = grid[grid["source"] != "gridfinder"]
         per_ward = []
         for ward_no, b in self.buildings.groupby("WardNo"):
-            nodes = far_from_grid(cluster_buildings(b, cfg), self.grid, cfg)
+            nodes = far_from_grid(cluster_buildings(b, cfg), grid, cfg)
             per_ward.append(nodes.assign(WardNo=ward_no))
         return pd.concat(per_ward, ignore_index=True)
 
@@ -55,6 +61,8 @@ def all_nodes_problem(nodes: gpd.GeoDataFrame, cfg: PilotConfig) -> MicrogridPro
 def screen_wards(muni: Municipality, cfg: PilotConfig) -> pd.DataFrame:
     """One row per ward: demand pool, candidate optimum, full optimum and greedy, all in kWh/day."""
     far = muni.far_nodes(cfg)
+    # Demand that is "near the grid" only because of a predicted line: missed if gridfinder is wrong.
+    mapped_only_demand = muni.far_nodes(cfg, mapped_only=True).groupby("WardNo")["demand_kwh_day"].sum()
     n_buildings = muni.buildings["WardNo"].value_counts()
     rows = []
     for ward_no in sorted(muni.wards["WardNo"]):
@@ -62,6 +70,8 @@ def screen_wards(muni: Municipality, cfg: PilotConfig) -> pd.DataFrame:
         row = {"ward": ward_no, "buildings": int(n_buildings.get(ward_no, 0)), "far_nodes": len(nodes),
                "far_buildings": int(nodes["n_buildings"].sum()), "far_demand": float(nodes["demand_kwh_day"].sum()),
                "eligible": len(nodes) >= cfg.n_candidates}
+        row["far_households"] = row["far_buildings"] * cfg.households_per_building
+        row["predicted_excluded_demand"] = float(mapped_only_demand.get(ward_no, 0.0)) - row["far_demand"]
         if len(nodes) >= cfg.n_sites:
             full = all_nodes_problem(nodes, cfg)
             row["full_served"] = full.served_demand(solve_milp(full).x)
