@@ -117,9 +117,9 @@ Start Jupyter with `uv run jupyter lab`.
 
 QUBO form (`src/quackathon/problem.py`):
 
-```math
-E(x) = \sum_j (c_j - \alpha D_j)\, x_j + \alpha \sum_{j<k} O_{jk}\, x_j x_k + P \Big(\sum_j x_j - K\Big)^2
-```
+$$
+E(x) = \sum_j (c_j - \alpha D_j)\, x_j + \alpha \sum_{j < k} O_{jk}\, x_j x_k + P \Big(\sum_j x_j - K\Big)^2
+$$
 
 $D_j$ is the demand that site $j$ reaches. $O_{jk}$ is the demand that both $j$ and $k$ reach.
 The QUBO is exact if no node is covered by three or more selected sites.
