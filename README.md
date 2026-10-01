@@ -95,6 +95,28 @@ targets.
 The first run takes about 3 minutes: it pulls every building in the municipality
 (about 312k) from Overture on S3 with DuckDB and caches them in `data/raw/`.
 
+## Interactive app
+
+    uv run quackathon-app
+
+A Dear PyGui window (`src/quackathon/app/`) for exploring one ward at a time:
+
+- **Settings** (left): the `PilotConfig` and QAOA options. **Run** queues a run. Runs go to two
+  worker processes, so the window stays responsive while QAOA runs, and the run table shows
+  live progress. Each run first builds the ward and solves it classically (about a second),
+  so the map appears before QAOA finishes.
+- **Map**: buildings, grid, demand nodes and candidate sites, with any plan drawn on top
+  (exact, greedy, QUBO, QAOA per depth, a sampled QAOA plan, or your own). Click a site to add
+  or remove it and see the served demand change. **Export** writes the plan to
+  `data/exports/*.geojson`.
+- **Sites**: per-candidate reach, grid distance, and the change in served demand if toggled.
+- **Compare**: every plan's served demand, gap to the optimum, and QUBO approximation error.
+- **QAOA**: output distribution over valid plans (click a bar to map that plan), the optimiser
+  trace (live while running), and P(optimum) / P(feasible) / approximation ratio by depth.
+- **Wards**: screen every ward classically (`screening.screen_wards`) and load one into the settings.
+
+Cancelling only stops queued runs. A running run is discarded when it finishes.
+
 ## Data sources and caveats
 
 | Layer | Source | Caveat |

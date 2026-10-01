@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "dearpygui>=2.3.1",
     "duckdb>=1.5.6",
     "geopandas>=1.2.0",
     "jupyterlab>=4.6.4",
@@ -20,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 quackathon = "quackathon:main"
+quackathon-app = "quackathon.app:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]

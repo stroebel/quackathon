@@ -15,6 +15,7 @@ Bit convention: qubit j is site j, and |1> means "build". Qiskit bitstrings put 
 rightmost, so int(bitstring, 2) is the same index `classical.all_bitstrings` uses.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -178,13 +179,15 @@ def qaoa_depth_sweep(
     maxiter: int = 300,
     restarts: int = 3,
     seed: int = 0,
+    callback: Callable[[int, int, float], None] | None = None,
 ) -> list[QAOAResult]:
     """Results for depth 1..max_reps.
 
     Each depth is seeded from the previous depth's optimum (INTERP, Zhou et al. 2020).
     Without this, deeper circuits often end up worse than shallow ones because COBYLA
     stalls in poor local minima. `penalty` only applies to the "x" mixer; the "xy"
-    mixer enforces K by construction.
+    mixer enforces K by construction. `callback(depth, evaluation, energy)` is called after
+    every optimiser evaluation, e.g. to report progress.
     """
     q, offset = problem.to_qubo(0.0 if mixer == "xy" else penalty)
     hamiltonian, constant = qubo_to_ising(q, offset)
@@ -205,9 +208,16 @@ def qaoa_depth_sweep(
     for depth in range(1, max_reps + 1):
         circuit = qaoa_circuit(h_norm, depth, mixer, problem.n_select)
 
-        def expected_energy(params: np.ndarray, circuit=circuit) -> float:
+        n_evals = 0
+
+        def expected_energy(params: np.ndarray, circuit=circuit, depth=depth) -> float:
+            nonlocal n_evals
             ev = estimator.run([(circuit, h_norm, params)]).result()[0].data.evs
-            return float(ev) * scale + constant
+            energy = float(ev) * scale + constant
+            n_evals += 1
+            if callback is not None:
+                callback(depth, n_evals, energy)
+            return energy
 
         if best_params is None:
             starts = _grid_starts(expected_energy, restarts)
