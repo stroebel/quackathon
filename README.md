@@ -63,35 +63,53 @@ The first run takes about 3 minutes. It downloads all buildings in the municipal
 
 Some tests need the shapefiles. Run `just setup` first.
 
-## Run on IBM Quantum hardware
+[//]: # (## Run on IBM Quantum hardware)
 
-The local simulator tunes the QAOA angles. Only the final sampling job goes to IBM. This is
-one job of a few seconds of QPU time.
+[//]: # ()
+[//]: # (The local simulator tunes the QAOA angles. Only the final sampling job goes to IBM. This is)
 
-1. Get an API key and your instance CRN from https://quantum.cloud.ibm.com.
-2. Set your credentials:
+[//]: # (one job of a few seconds of QPU time.)
 
-       export QISKIT_IBM_TOKEN=...       # API key
-       export QISKIT_IBM_INSTANCE=...    # instance CRN
+[//]: # ()
+[//]: # (1. Get an API key and your instance CRN from https://quantum.cloud.ibm.com.)
 
-   Or save them once to `~/.qiskit/qiskit-ibm.json`:
+[//]: # (2. Set your credentials:)
 
-       uv run python -c "from getpass import getpass; from qiskit_ibm_runtime import QiskitRuntimeService as S; \
-         S.save_account(channel='ibm_quantum_platform', token=getpass('API key: '), \
-         instance=input('Instance CRN: '), set_as_default=True, overwrite=True)"
+[//]: # ()
+[//]: # (       export QISKIT_IBM_TOKEN=...       # API key)
 
-3. Do a dry run on a local noisy model. This needs no account:
+[//]: # (       export QISKIT_IBM_INSTANCE=...    # instance CRN)
 
-       uv run quackathon --ward 14 --candidates 8 --qaoa-reps 1 --backend fake_torino
+[//]: # ()
+[//]: # (   Or save them once to `~/.qiskit/qiskit-ibm.json`:)
 
-4. Run on a real device:
+[//]: # ()
+[//]: # (       uv run python -c "from getpass import getpass; from qiskit_ibm_runtime import QiskitRuntimeService as S; \)
 
-       uv run quackathon --ward 14 --candidates 8 --qaoa-reps 1 --backend least_busy
+[//]: # (         S.save_account&#40;channel='ibm_quantum_platform', token=getpass&#40;'API key: '&#41;, \)
 
-Use 6 to 8 qubits at depth 1 on hardware. Larger problems give mostly noise. At depth 1, the
-circuit has about 120 two-qubit gates at 6 qubits, 280 at 8 qubits, and 570 at 12 qubits.
-On the noisy Torino model, P(optimum) is lower than random choice among valid plans. Only
-25–65% of shots are valid plans.
+[//]: # (         instance=input&#40;'Instance CRN: '&#41;, set_as_default=True, overwrite=True&#41;")
+
+[//]: # ()
+[//]: # (3. Do a dry run on a local noisy model. This needs no account:)
+
+[//]: # ()
+[//]: # (       uv run quackathon --ward 14 --candidates 8 --qaoa-reps 1 --backend fake_torino)
+
+[//]: # ()
+[//]: # (4. Run on a real device:)
+
+[//]: # ()
+[//]: # (       uv run quackathon --ward 14 --candidates 8 --qaoa-reps 1 --backend least_busy)
+
+[//]: # ()
+[//]: # (Use 6 to 8 qubits at depth 1 on hardware. Larger problems give mostly noise. At depth 1, the)
+
+[//]: # (circuit has about 120 two-qubit gates at 6 qubits, 280 at 8 qubits, and 570 at 12 qubits.)
+
+[//]: # (On the noisy Torino model, P&#40;optimum&#41; is lower than random choice among valid plans. Only)
+
+[//]: # (25–65% of shots are valid plans.)
 
 ## Notebooks
 
