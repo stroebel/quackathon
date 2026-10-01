@@ -1,4 +1,4 @@
-"""Plots for exploring a pilot: the region, the demand filter, the QUBO and its solutions.
+"""Plots for the siting problem: the region, the demand filter, the QUBO and its solutions.
 
 Colours follow one fixed role mapping so every figure reads the same way:
 blue = served / selected, orange = far-from-grid but unserved, grey = context.
@@ -75,7 +75,7 @@ def _map_axes(ax, gdf, title):
 
 
 def plot_municipality(wards, buildings, grid, pilot_ward: int | None = None, ax=None):
-    """Wards shaded by building count, with the grid and the pilot ward outlined."""
+    """Wards shaded by building count, with the grid and the selected ward outlined."""
     if ax is None:
         _, ax = plt.subplots(figsize=(9, 9))
     counts = buildings.sjoin(wards[["WardNo", "geometry"]], predicate="within")["WardNo"].value_counts()
@@ -90,7 +90,7 @@ def plot_municipality(wards, buildings, grid, pilot_ward: int | None = None, ax=
         ax.annotate(str(w["WardNo"]), (p.x, p.y), ha="center", va="center", fontsize=8, color=INK,
                     bbox={"boxstyle": "round,pad=0.2", "fc": SURFACE, "ec": "none", "alpha": 0.8})
     if pilot_ward is not None:
-        handles.append(plt.Line2D([], [], color=UNSERVED, linewidth=2.5, label=f"pilot ward {pilot_ward}"))
+        handles.append(plt.Line2D([], [], color=UNSERVED, linewidth=2.5, label=f"selected ward {pilot_ward}"))
     ax.legend(handles=handles, loc="lower left")
     _map_axes(ax, wards, "Ntabankulu (EC444): buildings per ward")
     return ax
@@ -343,28 +343,28 @@ def plot_convergence(result, ax=None):
 
 
 def plot_ward_screening(screen, ax=None):
-    """Per ward: far-from-grid demand, the best any K sites could serve, and the pilot optimum."""
+    """Per ward: far-from-grid demand, the best any K sites could serve, and the candidate optimum."""
     if ax is None:
         _, ax = plt.subplots(figsize=(11, 4))
-    s = screen.sort_values(["pilot_served", "far_demand"], ascending=False, na_position="last")
+    s = screen.sort_values(["served", "far_demand"], ascending=False, na_position="last")
     pos = np.arange(len(s))
     ax.bar(pos, s["far_demand"], width=0.8, color=CONTEXT, edgecolor=SURFACE, linewidth=2,
            label="far-from-grid demand")
     ax.bar(pos, s["full_served"].fillna(0), width=0.8, color=UNSERVED, edgecolor=SURFACE, linewidth=2,
            label="best K sites, any demand node")
-    ax.bar(pos, s["pilot_served"].fillna(0), width=0.8, color=SERVED, edgecolor=SURFACE, linewidth=2,
-           label="best K of the candidate sites (pilot)")
+    ax.bar(pos, s["served"].fillna(0), width=0.8, color=SERVED, edgecolor=SURFACE, linewidth=2,
+           label="best K of the candidate sites")
     for x, (_, r) in zip(pos, s.iterrows()):
-        if not r["pilot_ready"]:
+        if not r["eligible"]:
             ax.annotate("too few\nnodes", (x, r["far_demand"]), xytext=(0, 3), textcoords="offset points",
                         ha="center", va="bottom", fontsize=7, color=INK_SECONDARY)
     ax.set_axisbelow(True)
     ax.set_xticks(pos, [str(w) for w in s.index])
-    ax.set_xlabel("ward (best pilot first)")
+    ax.set_xlabel("ward (best first)")
     ax.set_ylabel("kWh/day")
     ax.grid(axis="x", visible=False)
     ax.legend(loc="upper right")
-    ax.set_title("Demand each ward's pilot can serve")
+    ax.set_title("Demand that each ward can serve")
     return ax
 
 
@@ -387,9 +387,9 @@ def plot_ward_choropleth(wards, values, label: str, title: str, highlight: int |
 
 
 def plot_rank_heatmap(ranks, ax=None, title: str = "Ward rank across configs"):
-    """Wards (rows) by config (columns), coloured by rank: dark = best. Blank = not pilot-ready.
+    """Wards (rows) by config (columns), coloured by rank: dark = best. Blank = not eligible.
 
-    Wards that are never pilot-ready are left out.
+    Wards that are never eligible are left out.
     """
     ranks = ranks.dropna(how="all")
     ranks = ranks.loc[ranks.astype(float).median(axis=1).sort_values(na_position="last").index]

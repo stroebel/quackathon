@@ -26,7 +26,7 @@ chosen sites. `classical.solve_exact` computes the true optimum for comparison.
 ## Choosing the ward
 
 `notebooks/ward_choice.ipynb` picks the pilot ward classically (`src/quackathon/screening.py`).
-It solves every ward's pilot problem exactly, solves the version with every demand node as a
+It solves every ward's candidate problem exactly, solves the version with every demand node as a
 candidate site as a MILP (`classical.solve_milp`, HiGHS), and checks that the ranking holds
 across service radius and grid-distance assumptions. At the default config, ward 4 serves the
 most demand (about 2× ward 19), with ward 1 a close second.

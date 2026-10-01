@@ -1,8 +1,8 @@
-"""Which ward to pilot in: solve every ward's siting problem classically and compare.
+"""Ward selection: solve the siting problem of every ward classically and compare.
 
 Each ward is solved two ways:
-- the pilot problem, choosing K of the `n_candidates` candidate sites (what the QUBO and
-  QAOA see), solved exactly by enumeration;
+- the candidate problem, choosing K of the `n_candidates` candidate sites (what the QUBO
+  and QAOA see), solved exactly by enumeration;
 - the full problem, where every far-from-grid demand node is a candidate site, solved
   exactly as a MILP. This is the best the ward could do without the qubit budget.
 """
@@ -53,7 +53,7 @@ def all_nodes_problem(nodes: gpd.GeoDataFrame, cfg: PilotConfig) -> MicrogridPro
 
 
 def screen_wards(muni: Municipality, cfg: PilotConfig) -> pd.DataFrame:
-    """One row per ward: demand pool, pilot optimum, full optimum and greedy, all in kWh/day."""
+    """One row per ward: demand pool, candidate optimum, full optimum and greedy, all in kWh/day."""
     far = muni.far_nodes(cfg)
     n_buildings = muni.buildings["WardNo"].value_counts()
     rows = []
@@ -61,22 +61,22 @@ def screen_wards(muni: Municipality, cfg: PilotConfig) -> pd.DataFrame:
         nodes = far[far["WardNo"] == ward_no].reset_index(drop=True)
         row = {"ward": ward_no, "buildings": int(n_buildings.get(ward_no, 0)), "far_nodes": len(nodes),
                "far_buildings": int(nodes["n_buildings"].sum()), "far_demand": float(nodes["demand_kwh_day"].sum()),
-               "pilot_ready": len(nodes) >= cfg.n_candidates}
+               "eligible": len(nodes) >= cfg.n_candidates}
         if len(nodes) >= cfg.n_sites:
             full = all_nodes_problem(nodes, cfg)
             row["full_served"] = full.served_demand(solve_milp(full).x)
-        if row["pilot_ready"]:
-            pilot = MicrogridProblem.from_geodata(nodes, candidate_sites(nodes, cfg), cfg)
-            row["pilot_served"] = pilot.served_demand(solve_exact(pilot).x)
-            row["greedy_served"] = pilot.served_demand(solve_greedy(pilot).x)
-            row["qubo_served"] = pilot.served_demand(solve_qubo_brute_force(*pilot.to_qubo()).x)
+        if row["eligible"]:
+            problem = MicrogridProblem.from_geodata(nodes, candidate_sites(nodes, cfg), cfg)
+            row["served"] = problem.served_demand(solve_exact(problem).x)
+            row["greedy_served"] = problem.served_demand(solve_greedy(problem).x)
+            row["qubo_served"] = problem.served_demand(solve_qubo_brute_force(*problem.to_qubo()).x)
         rows.append(row)
 
     df = pd.DataFrame(rows).set_index("ward")
-    df["pilot_share"] = df["pilot_served"] / df["far_demand"]
-    df["candidate_gap"] = 1 - df["pilot_served"] / df["full_served"]  # lost to the qubit budget
-    df["greedy_gap"] = 1 - df["greedy_served"] / df["pilot_served"]   # > 0: greedy is not enough
-    df["rank"] = df["pilot_served"].rank(ascending=False, method="min").astype("Int64")
+    df["served_share"] = df["served"] / df["far_demand"]
+    df["candidate_gap"] = 1 - df["served"] / df["full_served"]  # lost to the qubit budget
+    df["greedy_gap"] = 1 - df["greedy_served"] / df["served"]   # > 0: greedy is not enough
+    df["rank"] = df["served"].rank(ascending=False, method="min").astype("Int64")
     return df.sort_values("rank")
 
 
