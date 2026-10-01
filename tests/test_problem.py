@@ -3,7 +3,8 @@ from itertools import combinations
 import numpy as np
 import pytest
 
-from quackathon.classical import all_bitstrings, qubo_energies, solve_exact, solve_qubo_brute_force
+from quackathon.classical import (all_bitstrings, qubo_energies, solve_exact, solve_greedy, solve_milp,
+                                  solve_qubo_brute_force)
 from quackathon.config import PilotConfig
 from quackathon.problem import MicrogridProblem
 
@@ -73,3 +74,18 @@ def test_bitstring_ordering_is_little_endian():
 def test_config_rejects_more_sites_than_candidates():
     with pytest.raises(ValueError):
         PilotConfig(n_sites=5, n_candidates=4)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_milp_matches_enumeration(seed):
+    p = random_problem(seed, n_sites=10, k=3)
+    assert solve_milp(p).energy == pytest.approx(solve_exact(p).energy)
+    assert p.is_feasible(solve_milp(p).x)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_greedy_is_feasible_and_no_better_than_optimum(seed):
+    p = random_problem(seed, n_sites=10, k=3)
+    greedy = solve_greedy(p)
+    assert p.is_feasible(greedy.x)
+    assert greedy.energy >= solve_exact(p).energy - 1e-9

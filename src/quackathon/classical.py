@@ -46,3 +46,39 @@ def solve_exact(problem: MicrogridProblem) -> Solution:
         if best is None or energy < best.energy:
             best = Solution(x, energy)
     return best
+
+
+def solve_greedy(problem: MicrogridProblem) -> Solution:
+    """Add the site with the largest drop in objective, K times. The usual max-coverage baseline."""
+    x = np.zeros(problem.n_sites, dtype=np.int8)
+    for _ in range(problem.n_select):
+        trial = np.where(x == 0)[0]
+        energies = [problem.objective(x + np.eye(problem.n_sites, dtype=np.int8)[j]) for j in trial]
+        x[trial[int(np.argmin(energies))]] = 1
+    return Solution(x, problem.objective(x))
+
+
+def solve_milp(problem: MicrogridProblem, time_limit_s: float = 60.0) -> Solution:
+    """Optimum of the true objective as a mixed-integer program (HiGHS), for any number of sites.
+
+        minimise  c.x - alpha * d.y
+        s.t.      y_i <= sum_j a_ij x_j,   sum_j x_j = K,   x binary,   0 <= y <= 1
+
+    y can stay continuous: once x is integral, the best y_i is 1 if node i is covered and 0
+    otherwise.
+    """
+    from scipy.optimize import Bounds, LinearConstraint, milp
+    from scipy.sparse import csr_array, hstack, identity
+
+    n_nodes, n_sites = problem.coverage.shape
+    c = np.concatenate([problem.site_cost, -problem.value_per_kwh_day * problem.demand])
+    covered = LinearConstraint(hstack([-csr_array(problem.coverage.astype(float)), identity(n_nodes)]), -np.inf, 0)
+    cardinality = LinearConstraint(np.concatenate([np.ones(n_sites), np.zeros(n_nodes)])[None, :],
+                                   problem.n_select, problem.n_select)
+    res = milp(c, constraints=[covered, cardinality], bounds=Bounds(0, 1),
+               integrality=np.concatenate([np.ones(n_sites), np.zeros(n_nodes)]),
+               options={"time_limit": time_limit_s})
+    if res.x is None:
+        raise RuntimeError(f"MILP failed: {res.message}")
+    x = np.round(res.x[:n_sites]).astype(np.int8)
+    return Solution(x, problem.objective(x))

@@ -340,3 +340,103 @@ def plot_convergence(result, ax=None):
     ax.set_ylabel("expected energy ⟨E⟩")
     ax.set_title(f"COBYLA convergence (p={result.reps})")
     return ax
+
+
+def plot_ward_screening(screen, ax=None):
+    """Per ward: far-from-grid demand, the best any K sites could serve, and the pilot optimum."""
+    if ax is None:
+        _, ax = plt.subplots(figsize=(11, 4))
+    s = screen.sort_values(["pilot_served", "far_demand"], ascending=False, na_position="last")
+    pos = np.arange(len(s))
+    ax.bar(pos, s["far_demand"], width=0.8, color=CONTEXT, edgecolor=SURFACE, linewidth=2,
+           label="far-from-grid demand")
+    ax.bar(pos, s["full_served"].fillna(0), width=0.8, color=UNSERVED, edgecolor=SURFACE, linewidth=2,
+           label="best K sites, any demand node")
+    ax.bar(pos, s["pilot_served"].fillna(0), width=0.8, color=SERVED, edgecolor=SURFACE, linewidth=2,
+           label="best K of the candidate sites (pilot)")
+    for x, (_, r) in zip(pos, s.iterrows()):
+        if not r["pilot_ready"]:
+            ax.annotate("too few\nnodes", (x, r["far_demand"]), xytext=(0, 3), textcoords="offset points",
+                        ha="center", va="bottom", fontsize=7, color=INK_SECONDARY)
+    ax.set_axisbelow(True)
+    ax.set_xticks(pos, [str(w) for w in s.index])
+    ax.set_xlabel("ward (best pilot first)")
+    ax.set_ylabel("kWh/day")
+    ax.grid(axis="x", visible=False)
+    ax.legend(loc="upper right")
+    ax.set_title("Demand each ward's pilot can serve")
+    return ax
+
+
+def plot_ward_choropleth(wards, values, label: str, title: str, highlight: int | None = None, ax=None):
+    """Wards shaded by `values` (a Series indexed by WardNo); wards without a value are grey."""
+    if ax is None:
+        _, ax = plt.subplots(figsize=(8, 8))
+    wards = wards.assign(value=wards["WardNo"].map(values))
+    wards[wards["value"].isna()].plot(ax=ax, color="#f0efec", edgecolor=SURFACE, linewidth=1.5)
+    wards[wards["value"].notna()].plot(ax=ax, column="value", cmap=BLUES, edgecolor=SURFACE, linewidth=1.5,
+                                       legend=True, legend_kwds={"label": label, "shrink": 0.6})
+    if highlight is not None:
+        wards[wards["WardNo"] == highlight].boundary.plot(ax=ax, color=UNSERVED, linewidth=2.5)
+    for _, w in wards.iterrows():
+        p = w.geometry.representative_point()
+        ax.annotate(str(w["WardNo"]), (p.x, p.y), ha="center", va="center", fontsize=8, color=INK,
+                    bbox={"boxstyle": "round,pad=0.2", "fc": SURFACE, "ec": "none", "alpha": 0.8})
+    _map_axes(ax, wards, title)
+    return ax
+
+
+def plot_rank_heatmap(ranks, ax=None, title: str = "Ward rank across configs"):
+    """Wards (rows) by config (columns), coloured by rank: dark = best. Blank = not pilot-ready.
+
+    Wards that are never pilot-ready are left out.
+    """
+    ranks = ranks.dropna(how="all")
+    ranks = ranks.loc[ranks.astype(float).median(axis=1).sort_values(na_position="last").index]
+    values = ranks.to_numpy(float)
+    if ax is None:
+        _, ax = plt.subplots(figsize=(1 + 0.75 * values.shape[1], 0.4 * values.shape[0] + 1.5))
+    cmap = BLUES.reversed().copy()
+    cmap.set_bad("#f0efec")
+    vmax = np.nanmax(values)
+    ax.imshow(np.ma.masked_invalid(values), cmap=cmap, vmin=1, vmax=vmax, aspect="auto")
+    for (i, j), v in np.ndenumerate(values):
+        if np.isfinite(v):
+            ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=8,
+                    color=SURFACE if v <= vmax / 2 else INK)
+    cols = ranks.columns
+    labels = ["\n".join(f"{v:,.0f}" for v in (c if isinstance(c, tuple) else (c,))) for c in cols]
+    ax.set_xticks(range(len(cols)), labels, fontsize=8)
+    ax.set_yticks(range(len(ranks)), [f"ward {w}" for w in ranks.index], fontsize=8)
+    names = cols.names if getattr(cols, "names", None) else [cols.name]
+    ax.set_xlabel(" / ".join(str(n) for n in names))
+    ax.grid(False)
+    ax.set_title(title)
+    return ax
+
+
+def plot_allocation(wards, grid, nodes, sites, radius_m: float, ax=None, title: str | None = None):
+    """Municipality map: far-from-grid demand nodes and the chosen sites with their reach."""
+    if ax is None:
+        _, ax = plt.subplots(figsize=(9, 9))
+    wards.plot(ax=ax, color="#f4f3f0", edgecolor=CONTEXT, linewidth=1)
+    handles = _plot_grid(ax, grid, wards.buffer(5_000).union_all(), linewidth=1)
+    reach = sites.buffer(radius_m)
+    served = nodes.within(reach.union_all()).to_numpy()
+    sizes = 4 + 1.5 * nodes["demand_kwh_day"].to_numpy()
+    reach.plot(ax=ax, color=SERVED, alpha=0.12, edgecolor=SERVED, linewidth=1)
+    for mask, colour in [(~served, UNSERVED), (served, SERVED)]:
+        nodes[mask].plot(ax=ax, color=colour, markersize=sizes[mask], edgecolor=SURFACE, linewidth=0.4)
+    sites.plot(ax=ax, marker="^", color=SERVED, edgecolor=SURFACE, markersize=120, linewidth=1)
+    for _, w in wards.iterrows():
+        p = w.geometry.representative_point()
+        ax.annotate(str(w["WardNo"]), (p.x, p.y), ha="center", va="center", fontsize=8, color=INK_SECONDARY)
+    handles += [
+        plt.Line2D([], [], marker="o", linestyle="", color=SERVED, label="served demand"),
+        plt.Line2D([], [], marker="o", linestyle="", color=UNSERVED, label="far-from-grid demand, unserved"),
+        plt.Line2D([], [], marker="^", linestyle="", color=SERVED, markersize=10,
+                   label=f"chosen site ({radius_m:,.0f} m reach)"),
+    ]
+    ax.legend(handles=handles, loc="lower right", fontsize=9)
+    _map_axes(ax, wards, title or f"Best {len(sites)} sites anywhere in the municipality")
+    return ax
