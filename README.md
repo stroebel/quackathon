@@ -42,17 +42,17 @@ runs only. If a run has started, the app discards its result when it finishes.
 
 Main options (`uv run quackathon --help` shows all):
 
-| Option            | Default      | Meaning                                         |
-|-------------------|--------------|-------------------------------------------------|
-| `--ward`          | 1            | Ward number                                     |
-| `--sites`         | 3            | Number of microgrids to build (K)               |
-| `--candidates`    | 12           | Number of candidate sites (qubits)              |
-| `--radius`        | 1500         | Service radius in metres                        |
+| Option            | Default      | Meaning                                                   |
+|-------------------|--------------|-----------------------------------------------------------|
+| `--ward`          | 1            | Ward number                                               |
+| `--sites`         | 3            | Number of microgrids to build ($K$)                       |
+| `--candidates`    | 12           | Number of candidate sites (qubits)                        |
+| `--radius`        | 1500         | Service radius in metres                                  |
 | `--grid-distance` | 2000         | Keep only demand further than this from the grid (metres) |
-| `--grid-source`   | `gridfinder` | `gridfinder` or `osm`                           |
-| `--qaoa-reps`     | 3            | QAOA depth. 0 skips QAOA                        |
-| `--mixer`         | `xy`         | `xy` (valid plans only) or `x` (textbook QAOA)  |
-| `--backend`       | none         | IBM device, `least_busy`, or `fake_<device>`    |
+| `--grid-source`   | `gridfinder` | `gridfinder` or `osm`                                     |
+| `--qaoa-reps`     | 3            | QAOA depth. 0 skips QAOA                                  |
+| `--mixer`         | `xy`         | `xy` (valid plans only) or `x` (textbook QAOA)            |
+| `--backend`       | none         | IBM device, `least_busy`, or `fake_<device>`              |
 
 The first run takes about 3 minutes. It downloads all buildings in the municipality (about
 312k) from Overture on S3 and caches them in `data/raw/`. Later runs use the cache.
@@ -105,20 +105,23 @@ Start Jupyter with `uv run jupyter lab`.
 
 ### Problem
 
-- **Demand nodes** `i`: Overture buildings grouped into 500 m cells. Only nodes further than
+- **Demand nodes** $i$: Overture buildings grouped into 500 m cells. Only nodes further than
   `grid_distance_m` from the grid are kept. Demand is
-  `d_i = buildings × households_per_building × kWh_per_household_day`.
-- **Candidate sites** `j`: one qubit each. These are the `n_candidates` demand nodes that
-  reach the most demand, at least `service_radius_m / 2` apart.
-- **Decision**: `x_j ∈ {0,1}`. Build exactly `n_sites` microgrids.
-- **Objective**: minimise `Σ c_j x_j − α · served(x)`. A node is served if a selected site is
-  within `service_radius_m`.
+  $d_i = b_i \cdot h \cdot e$, where $b_i$ is the building count, $h$ is
+  `households_per_building` and $e$ is `kwh_per_household_day`.
+- **Candidate sites** $j$: one qubit each. These are the `n_candidates` demand nodes that
+  reach the most demand, at least $r/2$ apart, where $r$ is `service_radius_m`.
+- **Decision**: $x_j \in \{0, 1\}$. Build exactly $K$ (`n_sites`) microgrids.
+- **Objective**: minimise $\sum_j c_j x_j - \alpha \cdot \mathrm{served}(x)$. A node is served
+  if a selected site is within $r$.
 
 QUBO form (`src/quackathon/problem.py`):
 
-    E(x) = Σ_j (c_j − α D_j) x_j + α Σ_{j<k} O_jk x_j x_k + P (Σ_j x_j − K)²
+```math
+E(x) = \sum_j (c_j - \alpha D_j)\, x_j + \alpha \sum_{j<k} O_{jk}\, x_j x_k + P \Big(\sum_j x_j - K\Big)^2
+```
 
-`D_j` is the demand that site `j` reaches. `O_jk` is the demand that both `j` and `k` reach.
+$D_j$ is the demand that site $j$ reaches. $O_{jk}$ is the demand that both $j$ and $k$ reach.
 The QUBO is exact if no node is covered by three or more selected sites.
 `classical.solve_exact` finds the true optimum for comparison.
 
@@ -128,29 +131,29 @@ The QUBO is exact if no node is covered by three or more selected sites.
 solve each ward's candidate problem exactly. They also solve the problem with all demand
 nodes as candidates as a MILP (`classical.solve_milp`, HiGHS). Then they check that the
 ranking stays the same for different service radius and grid distance values. With the
-default config, ward 4 serves the most demand (about 2× ward 19). Ward 1 is a close second.
+default config, ward 4 serves the most demand (about $2\times$ ward 19). Ward 1 is a close second.
 
 ### Quantum solver
 
 `src/quackathon/quantum.py` runs QAOA on the Qiskit statevector simulator:
 
-1. Convert the QUBO to an Ising Hamiltonian (`SparsePauliOp`) with `x_j = (1 − Z_j)/2`.
+1. Convert the QUBO to an Ising Hamiltonian (`SparsePauliOp`) with $x_j = (1 - Z_j)/2$.
 2. The **XY mixer** (default) starts from the Dicke state. This is an equal superposition of
-   all K-site plans (Bärtschi & Eidenbenz circuit). It mixes with ring XY swaps. All samples
+   all $K$-site plans (Bärtschi & Eidenbenz circuit). It mixes with ring XY swaps. All samples
    are valid plans, so the cardinality penalty is not used. The **X mixer** (`--mixer x`) is
-   textbook QAOA from `|+⟩ⁿ`. It uses the penalty to enforce K.
+   textbook QAOA from $|+\rangle^{\otimes n}$. It uses the penalty to enforce $K$.
 3. COBYLA tunes the angles with `StatevectorEstimator`. Each depth starts from the angles of
    the previous depth (INTERP). `StatevectorSampler` samples the tuned circuit.
 
 ### Results
 
-Ward 14, 12 qubits, K = 3, depth 1–4:
+Ward 14, 12 qubits, $K = 3$, depth 1–4:
 
 |                     | XY mixer                | X mixer  |
 |---------------------|-------------------------|----------|
 | P(optimum)          | 0.9–1.2% (random 0.45%) | 0.0–0.2% |
 | P(feasible)         | 100%                    | 2–28%    |
-| Approximation ratio | 0.72–0.79               | < 0      |
+| Approximation ratio | 0.72–0.79               | $< 0$    |
 
 With 8 qubits (`--candidates 8`), P(optimum) goes from 4.0% to 7.0% over depths 1–4.
 Random choice gives 1.8%.
